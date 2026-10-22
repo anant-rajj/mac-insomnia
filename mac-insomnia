@@ -396,7 +396,13 @@ def cmd_stop(args):
             PID_FILE.unlink(missing_ok=True)
 
     cleanup()
-    print("[✓] Normal sleep verified: disablesleep is now 0.")
+    if get_disablesleep_status() == 0:
+        print("[✓] Normal sleep verified: SleepDisabled is now 0.")
+    else:
+        print("[✓] Daemon session stopped.")
+        print("[ℹ] Note: SleepDisabled remains 1. To restore standard macOS sleep, run:")
+        print("    sudo pmset -a disablesleep 0")
+        print("    Or set up passwordless permissions anytime with: mac-insomnia setup")
 
 def cmd_status(args):
     dis = get_disablesleep_status()
