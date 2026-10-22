@@ -2,9 +2,11 @@
 """
 mac-insomnia: Ultra-lightweight, safe macOS lid-closed stay-awake utility for AI & LLM tasks.
 Zero-bloat alternative to heavy menu bar apps. Takes < 10 KB disk and 0 MB idle RAM.
+Includes smart display blackout on lid close to conserve battery while processes keep running.
 """
 
 import atexit
+import getpass
 import json
 import os
 import re
@@ -20,7 +22,7 @@ STATE_FILE = STATE_DIR / "state.json"
 PID_FILE = STATE_DIR / "daemon.pid"
 
 def run_cmd(cmd, check=False):
-    """Execute a system command and return output."""
+    """Execute a system command and return returncode, stdout, stderr."""
     try:
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=check)
         return res.returncode, res.stdout.strip(), res.stderr.strip()
@@ -48,6 +50,19 @@ def get_battery_info():
         percent = int(match.group(1))
     return on_battery, percent
 
+def is_lid_closed():
+    """Check if the MacBook lid is closed using macOS IORegistry."""
+    code, out, _ = run_cmd(["ioreg", "-r", "-k", "AppleClamshellState", "-d", "1"])
+    if code == 0:
+        for line in out.splitlines():
+            if "AppleClamshellState" in line:
+                return "= Yes" in line
+    return False
+
+def sleep_display():
+    """Turn off display backlight immediately to save power without interrupting background jobs."""
+    run_cmd(["pmset", "displaysleepnow"])
+
 def check_sudo():
     """Check if passwordless sudo is configured for pmset disablesleep."""
     code, _, _ = run_cmd(["sudo", "-n", "pmset", "-g"])
@@ -60,13 +75,12 @@ def set_disablesleep(val):
         cmd = ["sudo", "-n", "pmset", "-a", "disablesleep", str(val)]
     code, out, err = run_cmd(cmd)
     if code != 0:
-        # Fallback to interactive sudo
         code, out, err = run_cmd(["sudo", "pmset", "-a", "disablesleep", str(val)])
     return code == 0, err
 
 def parse_duration(s):
     """Parse strings like '30m', '2h', '1.5h', '90s'."""
-    if not s or s == "indefinite" or s == "inf":
+    if not s or s in ("indefinite", "inf"):
         return None
     match = re.match(r'^([0-9.]+)([smhd])$', s.strip().lower())
     if not match:
@@ -96,7 +110,7 @@ def cleanup():
             pass
 
 def daemon_loop(duration_seconds, battery_floor=15):
-    """Run stay-awake loop with safety monitoring."""
+    """Run stay-awake loop with safety monitoring and display blackout on lid close."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
@@ -118,10 +132,11 @@ def daemon_loop(duration_seconds, battery_floor=15):
     ok, err = set_disablesleep(1)
     if not ok:
         print(f"[!] Failed to enable disablesleep: {err}", file=sys.stderr)
-        print("[!] Make sure to allow sudo or configure passwordless pmset.", file=sys.stderr)
+        print("[!] Make sure to allow sudo or configure passwordless pmset with 'mac-insomnia sudoers'.", file=sys.stderr)
         sys.exit(1)
 
     print("[✓] Insomnia active! Your Mac will NOT sleep when the lid is closed.")
+    print("[📴] Smart Display Off: Screen turns black when lid closes to conserve power while AI/scripts run.")
     if end_time:
         print(f"[⏱] Session will end at: {datetime.fromtimestamp(end_time).strftime('%Y-%m-%d %H:%M:%S')}")
     else:
@@ -134,6 +149,10 @@ def daemon_loop(duration_seconds, battery_floor=15):
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda s, f: sys.exit(0))
 
+    was_lid_closed = is_lid_closed()
+    if was_lid_closed:
+        sleep_display()
+
     try:
         while True:
             now = time.time()
@@ -141,16 +160,23 @@ def daemon_loop(duration_seconds, battery_floor=15):
                 print("\n[⏱] Timer reached! Ending insomnia session safely.")
                 break
 
+            # 1. Battery floor safety check
             on_batt, batt_pct = get_battery_info()
             if on_batt and batt_pct is not None and batt_pct <= battery_floor:
                 print(f"\n[⚠️] Battery at {batt_pct}% (below {battery_floor}% floor)! Reverting sleep settings to protect battery.")
                 break
 
-            # Check if externally altered
+            # 2. Smart display-off check: turn off screen when lid is closed
+            lid_closed = is_lid_closed()
+            if lid_closed and not was_lid_closed:
+                sleep_display()
+            was_lid_closed = lid_closed
+
+            # 3. Ensure disablesleep assertion remains active
             if get_disablesleep_status() != 1:
                 set_disablesleep(1)
 
-            time.sleep(10)
+            time.sleep(2)
     finally:
         cleanup()
         print("[✓] Normal sleep restored. Safe to close lid or put away!")
@@ -195,8 +221,10 @@ def cmd_stop(args):
 def cmd_status(args):
     dis = get_disablesleep_status()
     on_batt, batt_pct = get_battery_info()
+    lid_closed = is_lid_closed()
     print("=== mac-insomnia status ===")
     print(f"System Clamshell Stay-Awake (disablesleep): {'ACTIVE (1)' if dis == 1 else 'OFF (0)'}")
+    print(f"Lid State: {'CLOSED (Display Blackout Active)' if lid_closed else 'OPEN (Display Active)'}")
     print(f"Power Source: {'Battery (' + str(batt_pct) + '%)' if on_batt else 'AC Power / Charger'}")
 
     daemon_running = False
@@ -224,7 +252,7 @@ def cmd_status(args):
         print("Your Mac will stay awake with lid closed indefinitely. Run 'mac-insomnia stop' to reset.")
 
 def cmd_wrap(args):
-    """Run a given command while keeping lid awake, automatically restoring sleep when command finishes."""
+    """Run a given command while keeping Mac awake with display blacked out on lid close."""
     if not args:
         print("Usage: mac-insomnia wrap <command> [args...]")
         print("Example: mac-insomnia wrap ollama run deepseek-r1")
@@ -236,19 +264,42 @@ def cmd_wrap(args):
         sys.exit(1)
 
     print(f"[✓] Lid stay-awake activated for command: {' '.join(args)}")
+    print("[📴] Smart Display Off: Screen turns black when lid closes to conserve power while task runs.")
+    
     atexit.register(cleanup)
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda s, f: sys.exit(1))
 
+    was_lid_closed = is_lid_closed()
+    if was_lid_closed:
+        sleep_display()
+
     try:
-        proc = subprocess.run(args)
+        proc = subprocess.Popen(args)
+        while proc.poll() is None:
+            # Check battery safety floor (15%)
+            on_batt, batt_pct = get_battery_info()
+            if on_batt and batt_pct is not None and batt_pct <= 15:
+                print(f"\n[⚠️] Battery at {batt_pct}% (below 15% floor)! Terminating wrapped command to protect battery.")
+                proc.terminate()
+                break
+
+            # Turn off screen when lid is closed
+            lid_closed = is_lid_closed()
+            if lid_closed and not was_lid_closed:
+                sleep_display()
+            was_lid_closed = lid_closed
+
+            time.sleep(2)
+
+        proc.wait()
         sys.exit(proc.returncode)
     finally:
         cleanup()
         print("\n[✓] Command completed. Normal sleep restored!")
 
 def cmd_sudoers(args):
-    user = os.environ.get("USER", "anantraj")
+    user = os.environ.get("USER", getpass.getuser())
     rule = f"{user} ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1\n"
     print("=== Passwordless Sudoers Setup ===")
     print("To let mac-insomnia toggle stay-awake without asking for your password every time, run:\n")
@@ -262,8 +313,8 @@ def main():
         print("  mac-insomnia start 2h       # Stay awake lid-closed for 2 hours")
         print("  mac-insomnia start 45m      # Stay awake for 45 minutes")
         print("  mac-insomnia stop           # End session & restore normal sleep immediately")
-        print("  mac-insomnia status         # Show current status & battery safety")
-        print("  mac-insomnia wrap <cmd>     # Keep awake only while <cmd> runs, then restore sleep")
+        print("  mac-insomnia status         # Show current status, lid state & battery safety")
+        print("  mac-insomnia wrap <cmd>     # Keep awake only while <cmd> runs with auto display-off")
         print("  mac-insomnia sudoers        # Show one-line command to enable passwordless toggle")
         sys.exit(0)
 

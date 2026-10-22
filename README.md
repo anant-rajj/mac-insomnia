@@ -23,6 +23,7 @@ Most existing tools (Amphetamine, Insomnia.app, Macsomnia) are heavy Swift/Swift
 | **Idle RAM** | 80 – 120 MB | **0 MB** (no resident GUI) |
 | **Active RAM** | 80 – 120 MB | **< 8 MB** |
 | **Background Daemons** | Continuous launchd jobs | **None** (Clean on-demand process) |
+| **Smart Display Off** | ❌ Screen often stays backlit | **✅ Yes (Instant blackout on lid close)** |
 | **Command Wrapping** | ❌ No | **✅ Yes (`mac-insomnia wrap <cmd>`)** |
 | **Battery Safety Floor** | Sometimes | **✅ Yes (Auto-restores sleep at 15%)** |
 | **Fail-Safe Cleanup** | Prone to stuck sleep bugs | **✅ POSIX Signal Traps (`SIGINT/TERM/HUP`)** |
@@ -99,9 +100,10 @@ mac-insomnia wrap python run_eval.py
 
 ## 🛡️ Safety & Safeguards
 
-1. **Battery Floor Protection:** If running on battery power and charge drops to or below **15%**, `mac-insomnia` automatically restores normal sleep settings and terminates, preventing battery exhaustion.
-2. **Clean Signal Traps:** Standard `atexit` and signal handlers (`SIGINT`, `SIGTERM`, `SIGHUP`) ensure that interrupting the script instantly resets `disablesleep` back to `0`.
-3. **Orphan Detection:** Running `mac-insomnia status` inspects if `disablesleep` is stuck at `1` without an active daemon and warns you with an instant one-click reset.
+1. **Smart Display Blackout on Lid Close:** The instant the laptop lid closes, `mac-insomnia` detects the clamshell event and immediately turns off the screen (`pmset displaysleepnow`). The display goes completely black to stop battery drain and eliminate heat inside the closed laptop, while all background AI models, agents, scripts, and MCP servers run at full speed.
+2. **Battery Floor Protection:** If running on battery power and charge drops to or below **15%**, `mac-insomnia` automatically restores normal sleep settings and terminates, preventing battery exhaustion.
+3. **Clean Signal Traps:** Standard `atexit` and signal handlers (`SIGINT`, `SIGTERM`, `SIGHUP`) ensure that interrupting the script instantly resets `disablesleep` back to `0`.
+4. **Orphan Detection:** Running `mac-insomnia status` inspects if `disablesleep` is stuck at `1` without an active daemon and warns you with an instant one-click reset.
 
 ---
 
