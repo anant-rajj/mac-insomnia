@@ -2,10 +2,11 @@
 """
 mac-insomnia: Ultra-lightweight, safe macOS lid-closed stay-awake utility for AI & LLM tasks.
 Zero-bloat alternative to heavy menu bar apps. Takes < 10 KB disk and 0 MB idle RAM.
-Includes smart display blackout on lid close to conserve battery while processes keep running.
+Includes true detached background daemon and hardware display blackout on lid close.
 """
 
 import atexit
+import ctypes
 import getpass
 import json
 import os
@@ -14,12 +15,45 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 STATE_DIR = Path.home() / ".cache" / "mac-insomnia"
 STATE_FILE = STATE_DIR / "state.json"
 PID_FILE = STATE_DIR / "daemon.pid"
+LOG_FILE = STATE_DIR / "daemon.log"
+
+# --- Native Display Brightness Helpers (Zero Dependencies, uses built-in ctypes) ---
+
+def get_display_brightness():
+    """Get current built-in display brightness (0.0 to 1.0) using private DisplayServices."""
+    try:
+        cg = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+        cg.CGMainDisplayID.restype = ctypes.c_uint32
+        main_disp = cg.CGMainDisplayID()
+        dsf = ctypes.cdll.LoadLibrary('/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices')
+        b = ctypes.c_float()
+        res = dsf.DisplayServicesGetBrightness(main_disp, ctypes.byref(b))
+        if res == 0:
+            return float(b.value)
+    except Exception:
+        pass
+    return None
+
+def set_display_brightness(val):
+    """Set display brightness (0.0 to 1.0). 0.0 physically turns off the backlight."""
+    try:
+        val = max(0.0, min(1.0, float(val)))
+        cg = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+        cg.CGMainDisplayID.restype = ctypes.c_uint32
+        main_disp = cg.CGMainDisplayID()
+        dsf = ctypes.cdll.LoadLibrary('/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices')
+        res = dsf.DisplayServicesSetBrightness(main_disp, ctypes.c_float(val))
+        return res == 0
+    except Exception:
+        return False
+
+# --- System Power & Clamshell Status Helpers ---
 
 def run_cmd(cmd, check=False):
     """Execute a system command and return returncode, stdout, stderr."""
@@ -60,16 +94,19 @@ def is_lid_closed():
     return False
 
 def sleep_display():
-    """Turn off display backlight immediately to save power without interrupting background jobs."""
+    """Call pmset displaysleepnow as secondary measure."""
     run_cmd(["pmset", "displaysleepnow"])
 
 def check_sudo():
-    """Check if passwordless sudo is configured for pmset disablesleep."""
+    """Check if passwordless sudo is configured for pmset."""
     code, _, _ = run_cmd(["sudo", "-n", "pmset", "-g"])
     return code == 0
 
 def set_disablesleep(val):
     """Enable (1) or disable (0) clamshell sleep blocking."""
+    current = get_disablesleep_status()
+    if current == val:
+        return True, ""
     cmd = ["sudo", "pmset", "-a", "disablesleep", str(val)]
     if check_sudo():
         cmd = ["sudo", "-n", "pmset", "-a", "disablesleep", str(val)]
@@ -85,7 +122,7 @@ def parse_duration(s):
     match = re.match(r'^([0-9.]+)([smhd])$', s.strip().lower())
     if not match:
         try:
-            return float(s) * 60  # default to minutes
+            return float(s) * 60
         except ValueError:
             return None
     val, unit = float(match.group(1)), match.group(2)
@@ -93,11 +130,23 @@ def parse_duration(s):
     return val * multipliers[unit]
 
 def cleanup():
-    """Ensure disablesleep is restored to 0."""
+    """Ensure normal sleep and original display brightness are restored."""
+    # Restore saved brightness if needed
+    if STATE_FILE.exists():
+        try:
+            st = json.loads(STATE_FILE.read_text())
+            saved_b = st.get("saved_brightness")
+            is_blackout = st.get("is_blackout", False)
+            if is_blackout and saved_b is not None:
+                set_display_brightness(saved_b)
+        except Exception:
+            pass
+
     current = get_disablesleep_status()
     if current == 1:
         print("\n[mac-insomnia] Restoring normal macOS sleep settings (disablesleep 0)...")
         set_disablesleep(0)
+
     if STATE_FILE.exists():
         try:
             STATE_FILE.unlink()
@@ -118,12 +167,19 @@ def daemon_loop(duration_seconds, battery_floor=15):
     start_time = time.time()
     end_time = start_time + duration_seconds if duration_seconds else None
 
+    # Initial brightness
+    initial_b = get_display_brightness() or 0.7
+    saved_brightness = initial_b
+    is_blackout = False
+
     state = {
         "pid": os.getpid(),
         "start_time": datetime.now().isoformat(),
         "end_time": datetime.fromtimestamp(end_time).isoformat() if end_time else "indefinite",
         "duration_seconds": duration_seconds,
-        "battery_floor": battery_floor
+        "battery_floor": battery_floor,
+        "saved_brightness": saved_brightness,
+        "is_blackout": is_blackout
     }
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
@@ -133,56 +189,104 @@ def daemon_loop(duration_seconds, battery_floor=15):
     if not ok:
         print(f"[!] Failed to enable disablesleep: {err}", file=sys.stderr)
         print("[!] Make sure to allow sudo or configure passwordless pmset with 'mac-insomnia sudoers'.", file=sys.stderr)
+        cleanup()
         sys.exit(1)
 
-    print("[✓] Insomnia active! Your Mac will NOT sleep when the lid is closed.")
-    print("[📴] Smart Display Off: Screen turns black when lid closes to conserve power while AI/scripts run.")
-    if end_time:
-        print(f"[⏱] Session will end at: {datetime.fromtimestamp(end_time).strftime('%Y-%m-%d %H:%M:%S')}")
-    else:
-        print("[⏱] Session duration: INDEFINITE (until 'mac-insomnia stop' or battery floor)")
-    print(f"[🛡] Safety battery floor: {battery_floor}%")
-    print("[ℹ] Press Ctrl+C or run 'mac-insomnia stop' anytime to cancel.")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] mac-insomnia daemon active (PID {os.getpid()}).")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Clamshell stay-awake enabled (disablesleep 1).")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Smart Display Blackout: Screen turns black on lid close; restores on lid open.")
+    sys.stdout.flush()
 
     # Register exit handlers
     atexit.register(cleanup)
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda s, f: sys.exit(0))
 
+    # Check initial lid state
     was_lid_closed = is_lid_closed()
     if was_lid_closed:
+        cur_b = get_display_brightness()
+        if cur_b is not None and cur_b > 0.05:
+            saved_brightness = cur_b
+        set_display_brightness(0.0)
         sleep_display()
+        is_blackout = True
+        state["is_blackout"] = True
+        state["saved_brightness"] = saved_brightness
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Lid is CLOSED at launch -> Display blacked out.")
+        sys.stdout.flush()
 
     try:
         while True:
             now = time.time()
             if end_time and now >= end_time:
-                print("\n[⏱] Timer reached! Ending insomnia session safely.")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Timer reached! Ending insomnia session safely.")
                 break
 
             # 1. Battery floor safety check
             on_batt, batt_pct = get_battery_info()
             if on_batt and batt_pct is not None and batt_pct <= battery_floor:
-                print(f"\n[⚠️] Battery at {batt_pct}% (below {battery_floor}% floor)! Reverting sleep settings to protect battery.")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Battery at {batt_pct}% (<= {battery_floor}% floor)! Restoring sleep.")
                 break
 
-            # 2. Smart display-off check: turn off screen when lid is closed
+            # 2. Smart display-off check: turn off screen when lid is closed, restore when opened
             lid_closed = is_lid_closed()
             if lid_closed and not was_lid_closed:
+                # Lid just CLOSED -> Save brightness & blackout
+                cur_b = get_display_brightness()
+                if cur_b is not None and cur_b > 0.05:
+                    saved_brightness = cur_b
+                set_display_brightness(0.0)
                 sleep_display()
+                is_blackout = True
+                state["is_blackout"] = True
+                state["saved_brightness"] = saved_brightness
+                with open(STATE_FILE, "w") as f:
+                    json.dump(state, f, indent=2)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Lid CLOSED -> Display turned OFF (Blackout active, processes running).")
+                sys.stdout.flush()
+            elif not lid_closed and was_lid_closed:
+                # Lid just OPENED -> Restore brightness
+                target_b = saved_brightness if saved_brightness is not None else 0.7
+                set_display_brightness(target_b)
+                is_blackout = False
+                state["is_blackout"] = False
+                with open(STATE_FILE, "w") as f:
+                    json.dump(state, f, indent=2)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Lid OPENED -> Display restored to {int(target_b*100)}%.")
+                sys.stdout.flush()
+
             was_lid_closed = lid_closed
 
             # 3. Ensure disablesleep assertion remains active
             if get_disablesleep_status() != 1:
                 set_disablesleep(1)
 
-            time.sleep(2)
+            time.sleep(1.5)
     finally:
+        if is_blackout:
+            target_b = saved_brightness if saved_brightness is not None else 0.7
+            set_display_brightness(target_b)
         cleanup()
-        print("[✓] Normal sleep restored. Safe to close lid or put away!")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Normal sleep restored. Safe to close lid or put away!")
+        sys.stdout.flush()
 
 def cmd_start(args):
-    dur_str = args[0] if args else "2h"
+    dur_str = "2h"
+    foreground = False
+    
+    clean_args = []
+    for a in args:
+        if a in ("-f", "--foreground"):
+            foreground = True
+        else:
+            clean_args.append(a)
+            
+    if clean_args:
+        dur_str = clean_args[0]
+        
     dur_sec = parse_duration(dur_str)
     if dur_sec is None and dur_str not in ("indefinite", "inf"):
         print(f"[!] Invalid duration '{dur_str}'. Use e.g. 30m, 2h, 4h, or 'indefinite'.")
@@ -198,10 +302,52 @@ def cmd_start(args):
         except (ProcessLookupError, ValueError):
             PID_FILE.unlink(missing_ok=True)
 
+    if foreground:
+        print("[ℹ] Running in foreground mode. Press Ctrl+C to stop.")
+        daemon_loop(dur_sec)
+    else:
+        # Spawn detached background daemon
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "a") as log_fp:
+            script_path = str(Path(__file__).resolve())
+            proc = subprocess.Popen(
+                [sys.executable, script_path, "_daemon", dur_str],
+                stdout=log_fp,
+                stderr=log_fp,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True
+            )
+        
+        time.sleep(0.6)
+        if proc.poll() is None:
+            print(f"[✓] mac-insomnia started in background (PID {proc.pid})")
+            print(f"[✓] Clamshell stay-awake active for: {dur_str}")
+            print("[📴] Smart Display Blackout: Screen turns 100% black on lid close, and restores on lid open.")
+            print(f"[ℹ] Live log:   tail -f {LOG_FILE}")
+            print("[ℹ] Stop session: mac-insomnia stop")
+        else:
+            print(f"[!] Failed to start background daemon. Check log: {LOG_FILE}", file=sys.stderr)
+            sys.exit(1)
+
+def cmd_daemon(args):
+    """Internal entrypoint invoked by cmd_start background spawner."""
+    dur_str = args[0] if args else "2h"
+    dur_sec = parse_duration(dur_str)
     daemon_loop(dur_sec)
 
 def cmd_stop(args):
     stopped = False
+    # 1. Restore brightness if state recorded blackout
+    if STATE_FILE.exists():
+        try:
+            st = json.loads(STATE_FILE.read_text())
+            saved_b = st.get("saved_brightness")
+            if saved_b is not None:
+                set_display_brightness(saved_b)
+        except Exception:
+            pass
+
+    # 2. Kill daemon process
     if PID_FILE.exists():
         try:
             pid = int(PID_FILE.read_text().strip())
@@ -222,9 +368,13 @@ def cmd_status(args):
     dis = get_disablesleep_status()
     on_batt, batt_pct = get_battery_info()
     lid_closed = is_lid_closed()
+    cur_brightness = get_display_brightness()
+    
     print("=== mac-insomnia status ===")
     print(f"System Clamshell Stay-Awake (disablesleep): {'ACTIVE (1)' if dis == 1 else 'OFF (0)'}")
-    print(f"Lid State: {'CLOSED (Display Blackout Active)' if lid_closed else 'OPEN (Display Active)'}")
+    print(f"Lid State: {'CLOSED' if lid_closed else 'OPEN'}")
+    if cur_brightness is not None:
+        print(f"Display Brightness: {int(cur_brightness * 100)}% {'(Blackout active)' if cur_brightness == 0.0 else ''}")
     print(f"Power Source: {'Battery (' + str(batt_pct) + '%)' if on_batt else 'AC Power / Charger'}")
 
     daemon_running = False
@@ -233,7 +383,7 @@ def cmd_status(args):
             pid = int(PID_FILE.read_text().strip())
             os.kill(pid, 0)
             daemon_running = True
-            print(f"Daemon Status: RUNNING (PID {pid})")
+            print(f"Daemon Status: RUNNING (PID {pid}, background)")
         except ProcessLookupError:
             print("Daemon Status: NOT RUNNING (stale PID file)")
             PID_FILE.unlink(missing_ok=True)
@@ -245,6 +395,8 @@ def cmd_status(args):
             st = json.loads(STATE_FILE.read_text())
             print(f"Session Started: {st.get('start_time')}")
             print(f"Session Ends At: {st.get('end_time')}")
+            print(f"Safety Battery Floor: {st.get('battery_floor', 15)}%")
+            print(f"Blackout State: {'ON (Screen Black)' if st.get('is_blackout') else 'OFF (Screen Lit)'}")
         except Exception:
             pass
     elif dis == 1 and not daemon_running:
@@ -264,7 +416,10 @@ def cmd_wrap(args):
         sys.exit(1)
 
     print(f"[✓] Lid stay-awake activated for command: {' '.join(args)}")
-    print("[📴] Smart Display Off: Screen turns black when lid closes to conserve power while task runs.")
+    print("[📴] Smart Display Blackout: Screen turns 100% black on lid close, and restores on lid open.")
+    
+    saved_brightness = get_display_brightness() or 0.7
+    is_blackout = False
     
     atexit.register(cleanup)
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
@@ -272,7 +427,12 @@ def cmd_wrap(args):
 
     was_lid_closed = is_lid_closed()
     if was_lid_closed:
+        cur_b = get_display_brightness()
+        if cur_b is not None and cur_b > 0.05:
+            saved_brightness = cur_b
+        set_display_brightness(0.0)
         sleep_display()
+        is_blackout = True
 
     try:
         proc = subprocess.Popen(args)
@@ -284,17 +444,27 @@ def cmd_wrap(args):
                 proc.terminate()
                 break
 
-            # Turn off screen when lid is closed
+            # Check lid state
             lid_closed = is_lid_closed()
             if lid_closed and not was_lid_closed:
+                cur_b = get_display_brightness()
+                if cur_b is not None and cur_b > 0.05:
+                    saved_brightness = cur_b
+                set_display_brightness(0.0)
                 sleep_display()
+                is_blackout = True
+            elif not lid_closed and was_lid_closed:
+                set_display_brightness(saved_brightness)
+                is_blackout = False
             was_lid_closed = lid_closed
 
-            time.sleep(2)
+            time.sleep(1.5)
 
         proc.wait()
         sys.exit(proc.returncode)
     finally:
+        if is_blackout:
+            set_display_brightness(saved_brightness)
         cleanup()
         print("\n[✓] Command completed. Normal sleep restored!")
 
@@ -308,13 +478,13 @@ def cmd_sudoers(args):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: mac-insomnia <start [duration]|stop|status|wrap <cmd>|sudoers>")
+        print("Usage: mac-insomnia <start [duration] [-f]|stop|status|wrap <cmd>|sudoers>")
         print("Examples:")
-        print("  mac-insomnia start 2h       # Stay awake lid-closed for 2 hours")
-        print("  mac-insomnia start 45m      # Stay awake for 45 minutes")
-        print("  mac-insomnia stop           # End session & restore normal sleep immediately")
-        print("  mac-insomnia status         # Show current status, lid state & battery safety")
-        print("  mac-insomnia wrap <cmd>     # Keep awake only while <cmd> runs with auto display-off")
+        print("  mac-insomnia start 2h       # Stay awake in BACKGROUND for 2 hours (closing terminal won't kill it)")
+        print("  mac-insomnia start 45m -f   # Run in FOREGROUND")
+        print("  mac-insomnia stop           # End session & restore normal sleep + brightness immediately")
+        print("  mac-insomnia status         # Show status, lid state, brightness & battery safety")
+        print("  mac-insomnia wrap <cmd>     # Keep awake only while <cmd> runs with auto display-blackout")
         print("  mac-insomnia sudoers        # Show one-line command to enable passwordless toggle")
         sys.exit(0)
 
@@ -323,6 +493,8 @@ def main():
 
     if cmd == "start":
         cmd_start(args)
+    elif cmd == "_daemon":
+        cmd_daemon(args)
     elif cmd == "stop":
         cmd_stop(args)
     elif cmd == "status":

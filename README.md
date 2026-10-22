@@ -64,10 +64,12 @@ mac-insomnia status
 ```
 Outputs current power source, battery percentage, whether lid stay-awake (`disablesleep`) is active, and daemon session timer.
 
-### 2. Start a Stay-Awake Session
+### 2. Start a Stay-Awake Session (Runs as a Detached Background Daemon)
+
+`mac-insomnia start` launches automatically into the background and detaches from your terminal. You can safely close your terminal window or terminal app and the daemon will keep running!
 
 ```bash
-# Stay awake for 2 hours (default)
+# Stay awake in background for 2 hours (default)
 mac-insomnia start 2h
 
 # Custom durations (e.g. 30m, 45m, 4h, 1d)
@@ -75,6 +77,14 @@ mac-insomnia start 45m
 
 # Indefinite (stays awake until manually stopped or battery reaches floor)
 mac-insomnia start indefinite
+
+# Run in foreground instead (optional)
+mac-insomnia start 2h -f
+```
+
+View live daemon activity anytime:
+```bash
+tail -f ~/.cache/mac-insomnia/daemon.log
 ```
 
 ### 3. Stop Anytime
@@ -100,7 +110,7 @@ mac-insomnia wrap python run_eval.py
 
 ## 🛡️ Safety & Safeguards
 
-1. **Smart Display Blackout on Lid Close:** The instant the laptop lid closes, `mac-insomnia` detects the clamshell event and immediately turns off the screen (`pmset displaysleepnow`). The display goes completely black to stop battery drain and eliminate heat inside the closed laptop, while all background AI models, agents, scripts, and MCP servers run at full speed.
+1. **Hardware Display Blackout on Lid Close:** On macOS, when sleep is disabled, closing the lid prevents macOS from shutting off the display backlight automatically. `mac-insomnia` hooks directly into the Apple `DisplayServices` framework to physically drop display backlight brightness to **0.0%** the moment the clamshell sensor reports `AppleClamshellState = Yes`. The screen goes completely dark, eliminating heat against the closed lid and saving battery, while all AI models, agents, scripts, and MCP servers run at 100% speed. The original brightness is restored automatically the moment you open the lid!
 2. **Battery Floor Protection:** If running on battery power and charge drops to or below **15%**, `mac-insomnia` automatically restores normal sleep settings and terminates, preventing battery exhaustion.
 3. **Clean Signal Traps:** Standard `atexit` and signal handlers (`SIGINT`, `SIGTERM`, `SIGHUP`) ensure that interrupting the script instantly resets `disablesleep` back to `0`.
 4. **Orphan Detection:** Running `mac-insomnia status` inspects if `disablesleep` is stuck at `1` without an active daemon and warns you with an instant one-click reset.
