@@ -40,15 +40,15 @@ cd mac-insomnia
 ./install.sh
 ```
 
-### (Optional) Enable Passwordless Sudo
+### 2. (Recommended) One-Command Permission Setup
 
-macOS requires administrator privileges to toggle clamshell sleep (`pmset -a disablesleep`). To allow `mac-insomnia` to toggle without prompting for your password every time, run:
+macOS requires administrator privileges to toggle clamshell sleep (`pmset -a disablesleep`). To allow `mac-insomnia` to toggle sleep seamlessly without prompting for your password, run:
 
 ```bash
-mac-insomnia sudoers
+mac-insomnia setup
 ```
 
-Or manually run the one-line rule:
+Or manually run:
 ```bash
 echo "$USER ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1" | sudo tee /etc/sudoers.d/mac-insomnia > /dev/null && sudo chmod 0440 /etc/sudoers.d/mac-insomnia
 ```

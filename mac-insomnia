@@ -2,7 +2,11 @@
 """
 mac-insomnia: Ultra-lightweight, safe macOS lid-closed stay-awake utility for AI & LLM tasks.
 Zero-bloat alternative to heavy menu bar apps. Takes < 10 KB disk and 0 MB idle RAM.
-Includes true detached background daemon and hardware display blackout on lid close.
+Features:
+1. True detached background daemon (closing terminal will not kill it).
+2. Hardware display backlight blackout (0.0% brightness) on lid close via native DisplayServices.
+3. Automatic brightness restoration on lid open or session stop.
+4. 15% battery safety floor cutoff.
 """
 
 import atexit
@@ -64,14 +68,13 @@ def run_cmd(cmd, check=False):
         return 1, "", str(e)
 
 def get_disablesleep_status():
-    """Check current pmset disablesleep value."""
+    """Check current pmset disablesleep value (matches SleepDisabled or disablesleep in pmset -g)."""
     code, out, _ = run_cmd(["pmset", "-g"])
     if code == 0:
         for line in out.splitlines():
-            if "disablesleep" in line:
-                match = re.search(r'disablesleep\s+(\d+)', line)
-                if match:
-                    return int(match.group(1))
+            match = re.search(r'(?:SleepDisabled|disablesleep)\s+(\d+)', line, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
     return 0
 
 def get_battery_info():
@@ -112,8 +115,31 @@ def set_disablesleep(val):
         cmd = ["sudo", "-n", "pmset", "-a", "disablesleep", str(val)]
     code, out, err = run_cmd(cmd)
     if code != 0:
-        code, out, err = run_cmd(["sudo", "pmset", "-a", "disablesleep", str(val)])
+        if sys.stdin.isatty():
+            res = subprocess.run(["sudo", "pmset", "-a", "disablesleep", str(val)])
+            return res.returncode == 0, ""
     return code == 0, err
+
+def ensure_disablesleep_active():
+    """Ensure disablesleep is 1 before starting daemon or wrapped command."""
+    if get_disablesleep_status() == 1:
+        return True, ""
+    
+    # Try passwordless sudo
+    code, _, _ = run_cmd(["sudo", "-n", "pmset", "-a", "disablesleep", "1"])
+    if code == 0 and get_disablesleep_status() == 1:
+        return True, ""
+        
+    # If in terminal (interactive), run sudo directly with inherited stdin
+    if sys.stdin.isatty():
+        print("[ℹ] macOS requires administrator privileges to keep laptop awake with lid closed.")
+        print("[ℹ] Please enter your password if prompted (or run 'mac-insomnia setup' for passwordless mode):\n")
+        res = subprocess.run(["sudo", "pmset", "-a", "disablesleep", "1"])
+        if res.returncode == 0 and get_disablesleep_status() == 1:
+            return True, ""
+        return False, "Sudo authentication cancelled or failed."
+    else:
+        return False, "Passwordless sudo not configured. Run 'mac-insomnia setup' once in terminal."
 
 def parse_duration(s):
     """Parse strings like '30m', '2h', '1.5h', '90s'."""
@@ -168,7 +194,9 @@ def daemon_loop(duration_seconds, battery_floor=15):
     end_time = start_time + duration_seconds if duration_seconds else None
 
     # Initial brightness
-    initial_b = get_display_brightness() or 0.7
+    initial_b = get_display_brightness()
+    if initial_b is None or initial_b < 0.05:
+        initial_b = 0.7
     saved_brightness = initial_b
     is_blackout = False
 
@@ -184,11 +212,10 @@ def daemon_loop(duration_seconds, battery_floor=15):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
-    # Enable stay awake
+    # Enable stay awake if not already
     ok, err = set_disablesleep(1)
     if not ok:
         print(f"[!] Failed to enable disablesleep: {err}", file=sys.stderr)
-        print("[!] Make sure to allow sudo or configure passwordless pmset with 'mac-insomnia sudoers'.", file=sys.stderr)
         cleanup()
         sys.exit(1)
 
@@ -215,7 +242,7 @@ def daemon_loop(duration_seconds, battery_floor=15):
         state["saved_brightness"] = saved_brightness
         with open(STATE_FILE, "w") as f:
             json.dump(state, f, indent=2)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Lid is CLOSED at launch -> Display blacked out.")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Lid is CLOSED at launch -> Display backlight set to 0.0% (Blackout active).")
         sys.stdout.flush()
 
     try:
@@ -245,7 +272,7 @@ def daemon_loop(duration_seconds, battery_floor=15):
                 state["saved_brightness"] = saved_brightness
                 with open(STATE_FILE, "w") as f:
                     json.dump(state, f, indent=2)
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Lid CLOSED -> Display turned OFF (Blackout active, processes running).")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Lid CLOSED -> Hardware backlight set to 0.0% (Blackout active, tasks running).")
                 sys.stdout.flush()
             elif not lid_closed and was_lid_closed:
                 # Lid just OPENED -> Restore brightness
@@ -301,6 +328,13 @@ def cmd_start(args):
             sys.exit(1)
         except (ProcessLookupError, ValueError):
             PID_FILE.unlink(missing_ok=True)
+
+    # Verify or acquire disablesleep BEFORE detaching to background
+    ok, err = ensure_disablesleep_active()
+    if not ok:
+        print(f"[!] Failed to enable clamshell stay-awake: {err}", file=sys.stderr)
+        print("[!] Run 'mac-insomnia setup' once in terminal to configure passwordless sleep permissions.", file=sys.stderr)
+        sys.exit(1)
 
     if foreground:
         print("[ℹ] Running in foreground mode. Press Ctrl+C to stop.")
@@ -371,7 +405,7 @@ def cmd_status(args):
     cur_brightness = get_display_brightness()
     
     print("=== mac-insomnia status ===")
-    print(f"System Clamshell Stay-Awake (disablesleep): {'ACTIVE (1)' if dis == 1 else 'OFF (0)'}")
+    print(f"System Clamshell Stay-Awake (SleepDisabled): {'ACTIVE (1)' if dis == 1 else 'OFF (0)'}")
     print(f"Lid State: {'CLOSED' if lid_closed else 'OPEN'}")
     if cur_brightness is not None:
         print(f"Display Brightness: {int(cur_brightness * 100)}% {'(Blackout active)' if cur_brightness == 0.0 else ''}")
@@ -400,7 +434,7 @@ def cmd_status(args):
         except Exception:
             pass
     elif dis == 1 and not daemon_running:
-        print("\n[⚠️ WARNING] 'disablesleep' is currently 1, but no insomnia daemon is active!")
+        print("\n[⚠️ WARNING] 'SleepDisabled' is currently 1, but no insomnia daemon is active!")
         print("Your Mac will stay awake with lid closed indefinitely. Run 'mac-insomnia stop' to reset.")
 
 def cmd_wrap(args):
@@ -410,15 +444,17 @@ def cmd_wrap(args):
         print("Example: mac-insomnia wrap ollama run deepseek-r1")
         sys.exit(1)
 
-    ok, err = set_disablesleep(1)
+    ok, err = ensure_disablesleep_active()
     if not ok:
-        print(f"[!] Failed to set disablesleep: {err}", file=sys.stderr)
+        print(f"[!] Failed to enable clamshell stay-awake: {err}", file=sys.stderr)
         sys.exit(1)
 
     print(f"[✓] Lid stay-awake activated for command: {' '.join(args)}")
     print("[📴] Smart Display Blackout: Screen turns 100% black on lid close, and restores on lid open.")
     
-    saved_brightness = get_display_brightness() or 0.7
+    saved_brightness = get_display_brightness()
+    if saved_brightness is None or saved_brightness < 0.05:
+        saved_brightness = 0.7
     is_blackout = False
     
     atexit.register(cleanup)
@@ -468,24 +504,38 @@ def cmd_wrap(args):
         cleanup()
         print("\n[✓] Command completed. Normal sleep restored!")
 
+def cmd_setup(args):
+    """One-command setup for passwordless pmset sleep permissions."""
+    user = os.environ.get("USER", getpass.getuser())
+    rule = f"{user} ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1\n"
+    print("=== mac-insomnia One-Step Permission Setup ===")
+    print("Configuring passwordless sudo rule in /etc/sudoers.d/mac-insomnia...")
+    cmd = f"echo '{rule.strip()}' | sudo tee /etc/sudoers.d/mac-insomnia > /dev/null && sudo chmod 0440 /etc/sudoers.d/mac-insomnia"
+    res = subprocess.run(cmd, shell=True)
+    if res.returncode == 0:
+        print("[✓] Successfully configured! You can now run mac-insomnia without password prompts.")
+    else:
+        print("[!] Failed to configure sudoers rule. Please run manually:")
+        print(f"  {cmd}")
+
 def cmd_sudoers(args):
     user = os.environ.get("USER", getpass.getuser())
     rule = f"{user} ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1\n"
     print("=== Passwordless Sudoers Setup ===")
     print("To let mac-insomnia toggle stay-awake without asking for your password every time, run:\n")
     print(f"echo '{rule.strip()}' | sudo tee /etc/sudoers.d/mac-insomnia > /dev/null && sudo chmod 0440 /etc/sudoers.d/mac-insomnia\n")
-    print("This gives your account narrow access to ONLY those two pmset commands.")
+    print("Or simply run:\n  mac-insomnia setup\n")
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: mac-insomnia <start [duration] [-f]|stop|status|wrap <cmd>|sudoers>")
+        print("Usage: mac-insomnia <start [duration] [-f]|stop|status|wrap <cmd>|setup|sudoers>")
         print("Examples:")
         print("  mac-insomnia start 2h       # Stay awake in BACKGROUND for 2 hours (closing terminal won't kill it)")
         print("  mac-insomnia start 45m -f   # Run in FOREGROUND")
         print("  mac-insomnia stop           # End session & restore normal sleep + brightness immediately")
         print("  mac-insomnia status         # Show status, lid state, brightness & battery safety")
         print("  mac-insomnia wrap <cmd>     # Keep awake only while <cmd> runs with auto display-blackout")
-        print("  mac-insomnia sudoers        # Show one-line command to enable passwordless toggle")
+        print("  mac-insomnia setup          # One-command setup for passwordless permissions")
         sys.exit(0)
 
     cmd = sys.argv[1].lower()
@@ -501,10 +551,12 @@ def main():
         cmd_status(args)
     elif cmd == "wrap":
         cmd_wrap(args)
+    elif cmd in ("setup", "init"):
+        cmd_setup(args)
     elif cmd in ("sudoers", "install-sudoers"):
         cmd_sudoers(args)
     else:
-        print(f"[!] Unknown command '{cmd}'. Use start, stop, status, wrap, or sudoers.")
+        print(f"[!] Unknown command '{cmd}'. Use start, stop, status, wrap, setup, or sudoers.")
         sys.exit(1)
 
 if __name__ == '__main__':
