@@ -119,8 +119,26 @@ mac-insomnia wrap python run_eval.py
 
 ## 🗑️ Uninstallation
 
+### Option 1: Via Uninstaller Script (Recommended)
+From inside the repository folder, run:
 ```bash
 ./uninstall.sh
+```
+
+### Option 2: Manual Removal & Cleanup
+To reset system sleep settings and remove all installed files manually:
+```bash
+# 1. Stop any active stay-awake sessions and restore default macOS sleep
+mac-insomnia stop 2>/dev/null || true
+sudo pmset -a disablesleep 0 2>/dev/null || true
+
+# 2. Remove binary, cache/logs, and passwordless sudoers file
+rm -f ~/.local/bin/mac-insomnia
+rm -rf ~/.cache/mac-insomnia
+sudo rm -f /etc/sudoers.d/mac-insomnia
+
+# 3. Delete the repository directory
+rm -rf ~/mac-insomnia
 ```
 
 ---
