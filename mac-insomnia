@@ -22,6 +22,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+__version__ = "1.1.0"
+
 STATE_DIR = Path.home() / ".cache" / "mac-insomnia"
 STATE_FILE = STATE_DIR / "state.json"
 PID_FILE = STATE_DIR / "daemon.pid"
@@ -142,18 +144,26 @@ def ensure_disablesleep_active():
         return False, "Passwordless sudo not configured. Run 'mac-insomnia setup' once in terminal."
 
 def parse_duration(s):
-    """Parse strings like '30m', '2h', '1.5h', '90s'."""
-    if not s or s in ("indefinite", "inf"):
+    """Parse strings like '30m', '2h', '1.5h', '90s', '45 mins', '2 hours'."""
+    if not s or s.strip().lower() in ("indefinite", "inf", "infinity", "forever"):
         return None
-    match = re.match(r'^([0-9.]+)([smhd])$', s.strip().lower())
+    cleaned = s.strip().lower().replace(" ", "")
+    match = re.match(r'^([0-9.]+)([a-z]+)$', cleaned)
     if not match:
         try:
             return float(s) * 60
         except ValueError:
             return None
     val, unit = float(match.group(1)), match.group(2)
-    multipliers = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
-    return val * multipliers[unit]
+    multipliers = {
+        's': 1, 'sec': 1, 'secs': 1, 'second': 1, 'seconds': 1,
+        'm': 60, 'min': 60, 'mins': 60, 'minute': 60, 'minutes': 60,
+        'h': 3600, 'hr': 3600, 'hrs': 3600, 'hour': 3600, 'hours': 3600,
+        'd': 86400, 'day': 86400, 'days': 86400,
+    }
+    if unit in multipliers:
+        return val * multipliers[unit]
+    return None
 
 def cleanup():
     """Ensure normal sleep and original display brightness are restored."""
@@ -532,22 +542,31 @@ def cmd_sudoers(args):
     print(f"echo '{rule.strip()}' | sudo tee /etc/sudoers.d/mac-insomnia > /dev/null && sudo chmod 0440 /etc/sudoers.d/mac-insomnia\n")
     print("Or simply run:\n  mac-insomnia setup\n")
 
+def print_usage():
+    print(f"mac-insomnia v{__version__} - ultra-lightweight macOS lid-closed stay-awake utility\n")
+    print("Usage: mac-insomnia <start [duration] [-f]|stop|status|wrap <cmd>|setup|sudoers|help>")
+    print("Examples:")
+    print("  mac-insomnia start 2h       # Stay awake in BACKGROUND for 2 hours (closing terminal won't kill it)")
+    print("  mac-insomnia start 45m -f   # Run in FOREGROUND")
+    print("  mac-insomnia stop           # End session & restore normal sleep + brightness immediately")
+    print("  mac-insomnia status         # Show status, lid state, brightness & battery safety")
+    print("  mac-insomnia wrap <cmd>     # Keep awake only while <cmd> runs with auto display-blackout")
+    print("  mac-insomnia setup          # One-command setup for passwordless permissions")
+    print("  mac-insomnia --version      # Print version and exit")
+    print("  mac-insomnia --help         # Show this help message and exit")
+
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: mac-insomnia <start [duration] [-f]|stop|status|wrap <cmd>|setup|sudoers>")
-        print("Examples:")
-        print("  mac-insomnia start 2h       # Stay awake in BACKGROUND for 2 hours (closing terminal won't kill it)")
-        print("  mac-insomnia start 45m -f   # Run in FOREGROUND")
-        print("  mac-insomnia stop           # End session & restore normal sleep + brightness immediately")
-        print("  mac-insomnia status         # Show status, lid state, brightness & battery safety")
-        print("  mac-insomnia wrap <cmd>     # Keep awake only while <cmd> runs with auto display-blackout")
-        print("  mac-insomnia setup          # One-command setup for passwordless permissions")
+    if len(sys.argv) < 2 or sys.argv[1].lower() in ("-h", "--help", "help"):
+        print_usage()
         sys.exit(0)
 
     cmd = sys.argv[1].lower()
     args = sys.argv[2:]
 
-    if cmd == "start":
+    if cmd in ("-v", "--version", "version"):
+        print(f"mac-insomnia v{__version__}")
+        sys.exit(0)
+    elif cmd == "start":
         cmd_start(args)
     elif cmd == "_daemon":
         cmd_daemon(args)
@@ -562,7 +581,7 @@ def main():
     elif cmd in ("sudoers", "install-sudoers"):
         cmd_sudoers(args)
     else:
-        print(f"[!] Unknown command '{cmd}'. Use start, stop, status, wrap, setup, or sudoers.")
+        print(f"[!] Unknown command '{cmd}'. Use start, stop, status, wrap, setup, sudoers, or --help.")
         sys.exit(1)
 
 if __name__ == '__main__':
