@@ -11,8 +11,8 @@ rm -f "${HOME}/.local/bin/mac-insomnia"
 rm -rf "${HOME}/.cache/mac-insomnia"
 
 if [ -f /etc/sudoers.d/mac-insomnia ]; then
-  echo "Found /etc/sudoers.d/mac-insomnia. To remove it, run:"
-  echo "  sudo rm -f /etc/sudoers.d/mac-insomnia"
+  sudo rm -f /etc/sudoers.d/mac-insomnia 2>/dev/null || true
+  echo "[✓] Removed /etc/sudoers.d/mac-insomnia"
 fi
 
 echo "[✓] mac-insomnia has been uninstalled."

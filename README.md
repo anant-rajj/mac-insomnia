@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform: macOS](https://img.shields.io/badge/Platform-macOS%20Apple%20Silicon%20%7C%20Intel-lightgrey.svg)]()
-[![Footprint: < 10KB](https://img.shields.io/badge/Disk%20Footprint-%3C%2010%20KB-success.svg)]()
+[![Footprint: ~24 KB](https://img.shields.io/badge/Disk%20Footprint-~24%20KB-success.svg)]()
 [![Idle RAM: 0 MB](https://img.shields.io/badge/Idle%20RAM-0%20MB-success.svg)]()
 
 Keep your MacBook running with the lid closed without external displays or heavy menu-bar apps. Built specifically for developers running local LLMs (Ollama, llama.cpp), background AI agents, long training sessions, large downloads, or builds.
@@ -19,7 +19,7 @@ Most existing tools (Amphetamine, Insomnia.app, Macsomnia) are heavy Swift/Swift
 
 | Feature | Heavy Menu-Bar Apps | `mac-insomnia` |
 | :--- | :--- | :--- |
-| **Disk Space** | 50 – 100 MB | **~7 KB** |
+| **Disk Space** | 50 – 100 MB | **~24 KB** |
 | **Idle RAM** | 80 – 120 MB | **0 MB** (no resident GUI) |
 | **Active RAM** | 80 – 120 MB | **< 8 MB** |
 | **Background Daemons** | Continuous launchd jobs | **None** (Clean on-demand process) |
@@ -110,7 +110,7 @@ mac-insomnia wrap python run_eval.py
 
 ## 🛡️ Safety & Safeguards
 
-1. **Hardware Display Blackout on Lid Close:** On macOS, when sleep is disabled, closing the lid prevents macOS from shutting off the display backlight automatically. `mac-insomnia` hooks directly into the Apple `DisplayServices` framework to physically drop display backlight brightness to **0.0%** the moment the clamshell sensor reports `AppleClamshellState = Yes`. The screen goes completely dark, eliminating heat against the closed lid and saving battery, while all AI models, agents, scripts, and MCP servers run at 100% speed. The original brightness is restored automatically the moment you open the lid!
+1. **Hardware Display Blackout on Lid Close:** On macOS, when sleep is disabled, closing the lid prevents macOS from shutting off the display backlight automatically. `mac-insomnia` polls the clamshell sensor every ~0.5 s and, via Apple's private `DisplayServices` framework, drops the built-in display backlight brightness to **0.0%** once it detects `AppleClamshellState = Yes`. The screen goes completely dark, eliminating heat against the closed lid and saving battery, while all AI models, agents, scripts, and MCP servers run at 100% speed. The original brightness is restored automatically when you open the lid. (Built-in display only; external monitors are unaffected.)
 2. **Battery Floor Protection:** If running on battery power and charge drops to or below **15%**, `mac-insomnia` automatically restores normal sleep settings and terminates, preventing battery exhaustion.
 3. **Clean Signal Traps:** Standard `atexit` and signal handlers (`SIGINT`, `SIGTERM`, `SIGHUP`) ensure that interrupting the script instantly resets `disablesleep` back to `0`.
 4. **Orphan Detection:** Running `mac-insomnia status` inspects if `disablesleep` is stuck at `1` without an active daemon and warns you with an instant one-click reset.

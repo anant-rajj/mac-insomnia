@@ -301,7 +301,7 @@ def daemon_loop(duration_seconds, battery_floor=15):
             if get_disablesleep_status() != 1:
                 set_disablesleep(1)
 
-            time.sleep(1.5)
+            time.sleep(0.5)
     finally:
         if is_blackout:
             target_b = saved_brightness if saved_brightness is not None else 0.7
@@ -485,6 +485,10 @@ def cmd_wrap(args):
         set_display_brightness(0.0)
         sleep_display()
         is_blackout = True
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        state = {"pid": os.getpid(), "saved_brightness": saved_brightness, "is_blackout": True}
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
 
     try:
         proc = subprocess.Popen(args)
@@ -505,12 +509,20 @@ def cmd_wrap(args):
                 set_display_brightness(0.0)
                 sleep_display()
                 is_blackout = True
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                state = {"pid": os.getpid(), "saved_brightness": saved_brightness, "is_blackout": True}
+                with open(STATE_FILE, "w") as f:
+                    json.dump(state, f, indent=2)
             elif not lid_closed and was_lid_closed:
                 set_display_brightness(saved_brightness)
                 is_blackout = False
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                state = {"pid": os.getpid(), "saved_brightness": saved_brightness, "is_blackout": False}
+                with open(STATE_FILE, "w") as f:
+                    json.dump(state, f, indent=2)
             was_lid_closed = lid_closed
 
-            time.sleep(1.5)
+            time.sleep(0.5)
 
         proc.wait()
         sys.exit(proc.returncode)
@@ -556,6 +568,9 @@ def print_usage():
     print("  mac-insomnia --help         # Show this help message and exit")
 
 def main():
+    if sys.platform != "darwin":
+        sys.exit("mac-insomnia only supports macOS.")
+
     if len(sys.argv) < 2 or sys.argv[1].lower() in ("-h", "--help", "help"):
         print_usage()
         sys.exit(0)
