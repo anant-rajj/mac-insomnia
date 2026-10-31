@@ -117,6 +117,19 @@ mac-insomnia wrap python run_eval.py
 
 ---
 
+## ❓ Troubleshooting & FAQ
+
+#### Q: Why does `mac-insomnia` require sudo privileges?
+macOS strictly guards the clamshell sleep setting (`pmset -a disablesleep 1/0`) behind root privileges. Running `mac-insomnia setup` configures a secure, granular sudoers rule strictly for `/usr/bin/pmset -a disablesleep`, allowing you to run `mac-insomnia` commands seamlessly without password prompts.
+
+#### Q: How do I verify my Mac is actually staying awake?
+Run `mac-insomnia status`. It displays the active daemon PID, elapsed duration, remaining time, battery level, and confirms `SleepDisabled = 1`. You can also tail the live daemon log at `tail -f ~/.cache/mac-insomnia/daemon.log`.
+
+#### Q: Does my screen stay on when the lid is closed?
+No. `mac-insomnia` monitors the hardware clamshell sensor via Apple's native `DisplayServices` framework. When the lid closes, it automatically dims the display backlight to `0.0%`, completely turning off the screen to prevent heat buildup and preserve battery. When you reopen the lid, your previous brightness is restored immediately.
+
+---
+
 ## 🗑️ Uninstallation
 
 ### Option 1: Via Uninstaller Script (Recommended)
