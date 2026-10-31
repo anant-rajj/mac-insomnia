@@ -1,0 +1,40 @@
+name: CI Syntax & Lint Checks
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate:
+    name: Validate Scripts & Permissions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Compile and validate Python syntax
+        run: |
+          echo "Validating Python syntax for mac-insomnia..."
+          python3 -m py_compile mac-insomnia
+          echo "Python syntax check passed!"
+
+      - name: Validate Bash syntax with bash -n
+        run: |
+          echo "Validating Bash syntax for install.sh and uninstall.sh..."
+          bash -n install.sh
+          bash -n uninstall.sh
+          echo "Bash syntax check passed!"
+
+      - name: Verify executable permissions
+        run: |
+          test -x mac-insomnia || (echo "mac-insomnia must be executable" && exit 1)
+          test -x install.sh || (echo "install.sh must be executable" && exit 1)
+          test -x uninstall.sh || (echo "uninstall.sh must be executable" && exit 1)
+          echo "All script permissions verified!"
