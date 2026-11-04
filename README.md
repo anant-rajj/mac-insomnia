@@ -106,6 +106,14 @@ mac-insomnia wrap ollama run deepseek-r1
 mac-insomnia wrap python run_eval.py
 ```
 
+### 5. Check Active Status
+
+Check whether a session is currently active, daemon PID, power source, and battery safety floor without digging into log files:
+
+```bash
+mac-insomnia status
+```
+
 ---
 
 ## 🛡️ Safety & Safeguards
